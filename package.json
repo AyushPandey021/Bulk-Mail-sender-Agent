@@ -1,0 +1,21 @@
+{
+  "name": "genai",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@langchain/mistralai": "^1.1.0",
+    "dotenv": "^17.4.2",
+    "langchain": "^1.4.5",
+    "nodemailer": "^8.0.11",
+    "zod": "^4.4.3"
+  }
+}
