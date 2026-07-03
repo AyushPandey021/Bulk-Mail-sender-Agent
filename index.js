@@ -67,6 +67,60 @@ const sendJson = (response, statusCode, payload) => {
   response.end(JSON.stringify(payload));
 };
 
+const readMultipartSendBody = (request) => {
+  return new Promise((resolve, reject) => {
+    const fields = {};
+    const attachments = [];
+    const busboy = Busboy({
+      headers: request.headers,
+      limits: {
+        files: 10,
+        fileSize: 25 * 1024 * 1024,
+      },
+    });
+
+    busboy.on("field", (name, value) => {
+      fields[name] = value;
+    });
+
+    busboy.on("file", (fieldname, file, info) => {
+      if (fieldname !== "attachments") {
+        file.resume();
+        return;
+      }
+
+      const chunks = [];
+      const filename = info?.filename || "";
+
+      file.on("data", (chunk) => {
+        chunks.push(chunk);
+      });
+
+      file.on("limit", () => {
+        reject(new Error(`Attachment is too large: ${filename || "file"}`));
+        file.resume();
+      });
+
+      file.on("end", () => {
+        if (filename && chunks.length) {
+          attachments.push({
+            filename,
+            content: Buffer.concat(chunks),
+            contentType: info?.mimeType || undefined,
+          });
+        }
+      });
+    });
+
+    busboy.on("error", reject);
+    busboy.on("finish", () => {
+      resolve({ ...fields, attachments });
+    });
+
+    request.pipe(busboy);
+  });
+};
+
 const escapeHtml = (value = "") => {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -81,235 +135,443 @@ const page = `<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Bulk Mail Sender</title>
+  <title>Mail Manifest</title>
   <style>
     :root {
       color-scheme: light;
-      --bg: #f6f8fb;
+      --bg: #eef1f5;
       --panel: #ffffff;
-      --ink: #172033;
-      --muted: #607086;
-      --line: #d9e0ea;
-      --accent: #0f766e;
-      --accent-dark: #0b5f59;
-      --danger: #b42318;
-      --success: #067647;
-      --shadow: 0 18px 50px rgba(23, 32, 51, 0.12);
+      --ink: #1b2430;
+      --muted: #5c6b7a;
+      --faint: #8a97a6;
+      --line: #d7dee6;
+      --line-soft: #e6ebf1;
+      --accent: #1e3a5f;
+      --accent-dark: #142944;
+      --accent-soft: #eaf0f7;
+      --stamp: #c1392b;
+      --stamp-soft: #fdecea;
+      --success: #2f7d5c;
+      --success-soft: #eaf7f1;
+      --mono: "SFMono-Regular", ui-monospace, "Roboto Mono", Menlo, Consolas, monospace;
+      --sans: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
+      --serif: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+      --shadow: 0 12px 32px rgba(20, 28, 44, 0.10);
+      --radius: 10px;
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
       min-height: 100vh;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: var(--sans);
+      font-size: 14px;
       color: var(--ink);
-      background: var(--bg);
+      background:
+        radial-gradient(circle at 100% 0%, rgba(30, 58, 95, 0.05), transparent 45%),
+        var(--bg);
     }
 
     .app {
-      width: min(1120px, calc(100% - 32px));
+      width: min(1040px, calc(100% - 28px));
       margin: 0 auto;
-      padding: 32px 0;
+      padding: 24px 0 32px;
     }
 
+    /* ---- header / postmark ---- */
     .topbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      margin-bottom: 24px;
+      margin-bottom: 18px;
     }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .postmark {
+      position: relative;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 2px solid var(--accent);
+      flex: none;
+      display: grid;
+      place-items: center;
+    }
+
+    .postmark::before {
+      content: "";
+      position: absolute;
+      inset: 5px;
+      border-radius: 50%;
+      border: 1px dashed var(--accent);
+      opacity: 0.55;
+    }
+
+    .postmark svg { width: 18px; height: 18px; }
 
     h1 {
       margin: 0;
-      font-size: clamp(28px, 4vw, 44px);
-      line-height: 1.05;
-      letter-spacing: 0;
+      font-family: var(--serif);
+      font-weight: 700;
+      font-size: 22px;
+      letter-spacing: 0.2px;
+      line-height: 1.1;
     }
 
-    .status {
+    .eyebrow {
+      margin: 0;
+      font-size: 11px;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .status-chip {
       display: inline-flex;
       align-items: center;
-      min-height: 36px;
+      gap: 7px;
+      height: 30px;
       padding: 0 12px;
       border: 1px solid var(--line);
       border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
       color: var(--muted);
-      background: #fff;
+      background: var(--panel);
       white-space: nowrap;
     }
 
+    .status-chip .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: ${isMailConfigured ? "var(--success)" : "var(--stamp)"};
+      flex: none;
+    }
+
+    /* ---- layout ---- */
     .grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.85fr);
-      gap: 20px;
+      grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.9fr);
+      gap: 16px;
       align-items: start;
     }
 
     .panel {
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: var(--radius);
       box-shadow: var(--shadow);
     }
 
-    form.panel {
-      padding: 22px;
+    form.panel { padding: 18px; }
+
+    fieldset {
+      border: 0;
+      margin: 0;
+      padding: 0;
+      min-width: 0;
     }
 
-    .preview {
-      padding: 20px;
-      position: sticky;
-      top: 20px;
+    fieldset:disabled .field { opacity: 0.55; }
+
+    .section-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 0 0 10px;
+    }
+
+    .section-label::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--line-soft);
     }
 
     label {
       display: block;
-      margin-bottom: 8px;
-      font-weight: 700;
+      margin-bottom: 6px;
+      font-weight: 600;
       color: #263248;
+      font-size: 13px;
     }
 
-    input,
+    input[type="text"],
     textarea {
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 13px 14px;
+      padding: 10px 12px;
       font: inherit;
       color: var(--ink);
       background: #fbfcfe;
       outline: none;
-      transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
 
-    textarea {
-      min-height: 180px;
-      resize: vertical;
-      line-height: 1.5;
-    }
+    #recipients { font-family: var(--mono); font-size: 12.5px; min-height: 84px; }
+    #message { min-height: 130px; line-height: 1.5; }
 
-    input:focus,
+    textarea { resize: vertical; }
+
+    input[type="text"]:focus,
     textarea:focus {
       border-color: var(--accent);
-      background: #fff;
-      box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.14);
+      box-shadow: 0 0 0 3px var(--accent-soft);
     }
 
-    .field {
-      margin-bottom: 18px;
+    .file-drop {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 9px 12px;
+      background: #fbfcfe;
     }
+
+    .file-drop input[type="file"] {
+      font: inherit;
+      font-size: 12.5px;
+      color: var(--muted);
+      max-width: 100%;
+    }
+
+    .field { margin-bottom: 14px; }
+    .field:last-of-type { margin-bottom: 0; }
 
     .hint {
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.45;
+      margin-top: 6px;
+      color: var(--faint);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .divider {
+      height: 1px;
+      background: var(--line-soft);
+      margin: 16px 0;
     }
 
     .actions {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 14px;
-      margin-top: 22px;
+      gap: 10px;
+      margin-top: 16px;
+      flex-wrap: wrap;
     }
+
+    .actions-left { display: flex; gap: 8px; }
 
     button {
       border: 0;
       border-radius: 8px;
-      min-height: 46px;
-      padding: 0 18px;
+      height: 38px;
+      padding: 0 14px;
       font: inherit;
-      font-weight: 800;
+      font-size: 13px;
+      font-weight: 700;
       cursor: pointer;
+      transition: background 0.15s, transform 0.05s;
     }
+
+    button:active { transform: translateY(1px); }
 
     .send {
       color: #fff;
       background: var(--accent);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
 
-    .send:hover {
-      background: var(--accent-dark);
-    }
+    .send:hover:not(:disabled) { background: var(--accent-dark); }
 
-    .clear {
+    .ghost {
       color: #344054;
-      background: #edf2f7;
+      background: var(--accent-soft);
     }
+
+    .ghost:hover:not(:disabled) { background: #dee9f3; }
 
     button:disabled {
       cursor: not-allowed;
-      opacity: 0.65;
+      opacity: 0.55;
+    }
+
+    .spinner {
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.4);
+      border-top-color: #fff;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+
+    .send.busy .spinner { display: inline-block; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .lock-note {
+      display: none;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      color: var(--stamp);
+      font-weight: 600;
+      margin-top: 10px;
+      padding: 8px 10px;
+      background: var(--stamp-soft);
+      border-radius: 8px;
+    }
+
+    .lock-note.show { display: flex; }
+
+    /* ---- preview / manifest column ---- */
+    .preview {
+      padding: 16px;
+      position: sticky;
+      top: 16px;
+    }
+
+    .notice {
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--line-soft);
+      color: var(--muted);
+      background: #f8fafc;
+      line-height: 1.4;
+      font-size: 12.5px;
+      margin-bottom: 12px;
+    }
+
+    .notice.error { border-color: #f3c8c4; background: var(--stamp-soft); color: var(--stamp); }
+    .notice.success { border-color: #bfe3d1; background: var(--success-soft); color: var(--success); }
+
+    .manifest-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .manifest-head .section-label { margin: 0; }
+
+    .count-badge {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
     }
 
     .recipient-list {
       display: grid;
-      gap: 8px;
-      max-height: 320px;
-      min-height: 120px;
+      gap: 6px;
+      max-height: 260px;
+      min-height: 100px;
       overflow-y: auto;
-      border: 1px solid var(--line);
+      border: 1px solid var(--line-soft);
       border-radius: 8px;
-      padding: 10px;
+      padding: 8px;
       background: #fbfcfe;
-      margin-bottom: 18px;
+      margin-bottom: 16px;
     }
 
     .recipient-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
-      gap: 10px;
-      min-height: 38px;
-      padding: 8px 10px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
+      gap: 8px;
+      min-height: 32px;
+      padding: 6px 9px;
+      border: 1px solid var(--line-soft);
+      border-radius: 7px;
       background: #fff;
     }
 
     .recipient-email {
       overflow-wrap: anywhere;
-      font-size: 14px;
-      line-height: 1.35;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.3;
     }
 
     .recipient-state {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-width: 28px;
-      min-height: 28px;
-      border-radius: 999px;
-      color: var(--muted);
-      background: #edf2f7;
+      min-width: 24px;
+      min-height: 24px;
+      border-radius: 50%;
+      color: var(--faint);
+      background: var(--accent-soft);
       font-weight: 800;
-      font-size: 15px;
+      font-size: 12px;
     }
 
-    .recipient-row.sending .recipient-state {
-      color: #8a4b00;
-      background: #fff4d6;
-    }
+    .recipient-row.sending { border-color: #f3d9a6; }
+    .recipient-row.sending .recipient-state { color: #8a4b00; background: #fff4d6; }
 
-    .recipient-row.sent .recipient-state {
-      color: var(--success);
-      background: #ecfdf3;
-    }
+    .recipient-row.sent { border-color: #bfe3d1; }
+    .recipient-row.sent .recipient-state { color: var(--success); background: var(--success-soft); }
 
+    .recipient-row.bad,
+    .recipient-row.failed { border-color: #f3c8c4; }
     .recipient-row.bad .recipient-state,
-    .recipient-row.failed .recipient-state {
-      color: var(--danger);
-      background: #fff1f0;
+    .recipient-row.failed .recipient-state { color: var(--stamp); background: var(--stamp-soft); }
+
+    .attachment-list {
+      display: grid;
+      gap: 6px;
+      max-height: 120px;
+      overflow-y: auto;
+      margin-bottom: 16px;
+    }
+
+    .attachment-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+      min-height: 30px;
+      padding: 6px 9px;
+      border: 1px solid var(--line-soft);
+      border-radius: 7px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .attachment-icon {
+      color: var(--accent);
+      font-weight: 800;
+    }
+
+    .attachment-name {
+      overflow-wrap: anywhere;
     }
 
     .message-preview {
-      border-top: 1px solid var(--line);
-      padding-top: 18px;
+      border-top: 1px solid var(--line-soft);
+      padding-top: 14px;
     }
 
     .subject-preview,
@@ -319,119 +581,122 @@ const page = `<!doctype html>
     }
 
     .subject-preview {
-      font-weight: 800;
-      margin-bottom: 10px;
+      font-family: var(--serif);
+      font-weight: 700;
+      font-size: 15px;
+      margin-bottom: 8px;
+      color: var(--ink);
     }
 
     .body-preview {
       color: #35445a;
-      line-height: 1.55;
-      max-height: 280px;
+      line-height: 1.5;
+      font-size: 12.5px;
+      max-height: 220px;
       overflow: auto;
     }
 
-    .notice {
-      min-height: 46px;
-      display: flex;
-      align-items: center;
-      padding: 12px 14px;
-      border-radius: 8px;
-      border: 1px solid transparent;
-      color: var(--muted);
-      background: #f8fafc;
-      line-height: 1.4;
-    }
-
-    .notice.error {
-      border-color: #fecdca;
-      background: #fff1f0;
-      color: var(--danger);
-    }
-
-    .notice.success {
-      border-color: #abefc6;
-      background: #ecfdf3;
-      color: var(--success);
-    }
-
     @media (max-width: 820px) {
-      .topbar,
-      .actions {
-        align-items: stretch;
-        flex-direction: column;
-      }
-
-      .grid {
-        grid-template-columns: 1fr;
-      }
-
-      .preview {
-        position: static;
-      }
+      .grid { grid-template-columns: 1fr; }
+      .preview { position: static; }
     }
 
     @media (max-width: 520px) {
-      .app {
-        width: min(100% - 20px, 1120px);
-        padding: 18px 0;
-      }
-
-      form.panel,
-      .preview {
-        padding: 16px;
-      }
-
-      .recipient-list {
-        max-height: 260px;
-      }
-
-      button {
-        width: 100%;
-      }
+      .app { width: min(100% - 20px, 1040px); padding: 16px 0 24px; }
+      form.panel, .preview { padding: 14px; }
+      .recipient-list { max-height: 220px; }
+      .actions { flex-direction: column-reverse; align-items: stretch; }
+      .actions-left { justify-content: stretch; }
+      .actions-left button { flex: 1; }
+      button { width: 100%; }
     }
   </style>
 </head>
 <body>
   <main class="app">
     <header class="topbar">
-      <h1>Bulk Mail Sender</h1>
-      <div class="status" id="configStatus">Mail service: ${isMailConfigured ? "ready" : "not configured"}</div>
+      <div class="brand">
+        <span class="postmark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#1e3a5f" stroke-width="1.6">
+            <path d="M3 6.5h18v11H3z" stroke-linejoin="round" />
+            <path d="M3 6.5l9 7 9-7" stroke-linejoin="round" />
+          </svg>
+        </span>
+        <div>
+          <p class="eyebrow">Bulk dispatch</p>
+          <h1>Mail Manifest</h1>
+        </div>
+      </div>
+      <div class="status-chip"><span class="dot"></span>${isMailConfigured ? "Sender ready" : "Not configured"}</div>
     </header>
 
     <section class="grid">
       <form class="panel" id="mailForm">
-        <div class="field">
-          <label for="recipients">Recipients</label>
-          <textarea id="recipients" name="recipients" placeholder="person1@example.com, person2@example.com"></textarea>
-          <div class="hint">Use commas, spaces, semicolons, or new lines. Duplicate addresses are sent only once.</div>
-        </div>
+        <fieldset id="formFields">
+          <p class="section-label">Recipients</p>
+          <div class="field">
+            <label for="recipients">Addresses</label>
+            <textarea id="recipients" name="recipients" placeholder="person1@example.com, person2@example.com"></textarea>
+            <div class="hint">Commas, spaces, semicolons, or new lines all work. Duplicates are sent once.</div>
+          </div>
 
-        <div class="field">
-          <label for="fileInput">Upload files (PDF, XLSX, CSV)</label>
-          <input id="fileInput" name="files" type="file" multiple accept=".pdf,.xls,.xlsx,.csv,text/csv" />
-          <div class="hint">Select one or more PDF/Excel/CSV files to extract emails.</div>
-        </div>
+          <div class="field">
+            <label for="fileInput">Or extract from a file</label>
+            <div class="file-drop">
+              <input id="fileInput" name="files" type="file" multiple accept=".pdf,.xls,.xlsx,.csv,text/csv" />
+            </div>
+            <div class="hint">PDF, XLSX, or CSV — addresses found inside will be pulled out automatically.</div>
+          </div>
 
-        <div class="field">
-          <label for="subject">Subject</label>
-          <input id="subject" name="subject" type="text" placeholder="Quick update" />
-        </div>
+          <div class="divider"></div>
 
-        <div class="field">
-          <label for="message">Message</label>
-          <textarea id="message" name="message" placeholder="Hello,"></textarea>
-        </div>
+          <p class="section-label">Message</p>
+          <div class="field">
+            <label for="subject">Subject</label>
+            <input id="subject" name="subject" type="text" placeholder="Quick update" />
+          </div>
+
+          <div class="field">
+            <label for="message">Body</label>
+            <textarea id="message" name="message" placeholder="Hello,"></textarea>
+          </div>
+
+          <div class="field">
+            <label for="attachmentInput">Attach documents</label>
+            <div class="file-drop">
+              <input id="attachmentInput" name="attachments" type="file" multiple accept=".pdf,.doc,.docx,.txt,.rtf,.odt,.xls,.xlsx,.csv,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+            </div>
+            <div class="hint">Attach PDF, document, resume, spreadsheet, or text files to every email.</div>
+          </div>
+        </fieldset>
 
         <div class="actions">
-          <button class="clear" type="button" id="clearButton">Clear</button>
-          <button class="clear" type="button" id="extractButton">Extract emails</button>
-          <button class="send" type="submit" id="sendButton">Send to recipients</button>
+          <div class="actions-left">
+            <button class="ghost" type="button" id="clearButton">Clear</button>
+            <button class="ghost" type="button" id="extractButton">Extract emails</button>
+          </div>
+          <button class="send" type="submit" id="sendButton">
+            <span class="spinner"></span>
+            <span class="sendLabel">Send to recipients</span>
+          </button>
         </div>
+
+        <div class="lock-note" id="lockNote">Sending in progress — fields are locked until it finishes.</div>
       </form>
 
       <aside class="panel preview">
         <div class="notice" id="notice">Write a message, add recipients, then send once.</div>
+
+        <div class="manifest-head">
+          <p class="section-label">Manifest</p>
+          <span class="count-badge" id="countBadge">0 addresses</span>
+        </div>
         <div class="recipient-list" id="recipientList"></div>
+
+        <div class="manifest-head">
+          <p class="section-label">Attachments</p>
+        </div>
+        <div class="attachment-list" id="attachmentList"></div>
 
         <div class="message-preview">
           <div class="subject-preview" id="subjectPreview">Subject preview</div>
@@ -443,17 +708,23 @@ const page = `<!doctype html>
 
   <script>
     const form = document.querySelector("#mailForm");
+    const formFields = document.querySelector("#formFields");
     const recipientsInput = document.querySelector("#recipients");
     const subjectInput = document.querySelector("#subject");
     const messageInput = document.querySelector("#message");
     const sendButton = document.querySelector("#sendButton");
+    const sendLabel = sendButton.querySelector(".sendLabel");
     const clearButton = document.querySelector("#clearButton");
+    const extractButton = document.querySelector("#extractButton");
+    const fileInput = document.querySelector("#fileInput");
+    const attachmentInput = document.querySelector("#attachmentInput");
     const notice = document.querySelector("#notice");
     const recipientList = document.querySelector("#recipientList");
+    const attachmentList = document.querySelector("#attachmentList");
+    const countBadge = document.querySelector("#countBadge");
     const subjectPreview = document.querySelector("#subjectPreview");
     const bodyPreview = document.querySelector("#bodyPreview");
-    const fileInput = document.querySelector("#fileInput");
-    const extractButton = document.querySelector("#extractButton");
+    const lockNote = document.querySelector("#lockNote");
     const emailPattern = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;
 
     const parseRecipients = (value) => {
@@ -473,13 +744,25 @@ const page = `<!doctype html>
       row.querySelector(".recipient-state").textContent = symbol;
     };
 
+    // Locks every editable field for the duration of a send so the
+    // in-flight message can't be changed mid-dispatch.
+    const setSendingLock = (isSending) => {
+      formFields.disabled = isSending;
+      clearButton.disabled = isSending;
+      extractButton.disabled = isSending;
+      sendButton.disabled = isSending;
+      sendButton.classList.toggle("busy", isSending);
+      sendLabel.textContent = isSending ? "Sending..." : "Send to recipients";
+      lockNote.classList.toggle("show", isSending);
+    };
+
     const updatePreview = () => {
       const emails = parseRecipients(recipientsInput.value);
-      const valid = emails.filter((email) => emailPattern.test(email));
-      const invalid = emails.filter((email) => !emailPattern.test(email));
+      const attachments = Array.from(attachmentInput.files || []);
 
       subjectPreview.textContent = subjectInput.value.trim() || "Subject preview";
       bodyPreview.textContent = messageInput.value.trim() || "Message preview";
+      countBadge.textContent = emails.length + (emails.length === 1 ? " address" : " addresses");
 
       recipientList.innerHTML = "";
 
@@ -509,10 +792,38 @@ const page = `<!doctype html>
         row.appendChild(state);
         recipientList.appendChild(row);
       });
+
+      attachmentList.innerHTML = "";
+
+      if (!attachments.length) {
+        const empty = document.createElement("div");
+        empty.className = "attachment-row";
+        empty.innerHTML = '<span class="attachment-icon">-</span><span class="attachment-name">No document attached</span>';
+        attachmentList.appendChild(empty);
+        return;
+      }
+
+      attachments.forEach((file) => {
+        const row = document.createElement("div");
+        row.className = "attachment-row";
+
+        const icon = document.createElement("span");
+        icon.className = "attachment-icon";
+        icon.textContent = "+";
+
+        const name = document.createElement("span");
+        name.className = "attachment-name";
+        name.textContent = file.name;
+
+        row.appendChild(icon);
+        row.appendChild(name);
+        attachmentList.appendChild(row);
+      });
     };
 
-    [recipientsInput, subjectInput, messageInput].forEach((input) => {
+    [recipientsInput, subjectInput, messageInput, attachmentInput].forEach((input) => {
       input.addEventListener("input", updatePreview);
+      input.addEventListener("change", updatePreview);
     });
 
     clearButton.addEventListener("click", () => {
@@ -544,9 +855,13 @@ const page = `<!doctype html>
         return;
       }
 
-      sendButton.disabled = true;
-      extractButton.disabled = true;
-      sendButton.textContent = "Sending...";
+      // Freeze the subject/body/recipients now, so what gets sent is exactly
+      // what the manifest showed the moment "Send" was pressed.
+      const lockedSubject = subject;
+      const lockedMessage = message;
+      const lockedAttachments = Array.from(attachmentInput.files || []);
+
+      setSendingLock(true);
       setNotice("Sending one by one...");
 
       try {
@@ -556,10 +871,17 @@ const page = `<!doctype html>
           setRecipientState(recipient, "sending", "...");
           setNotice("Sending to " + recipient);
 
+          const formData = new FormData();
+          formData.append("recipients", JSON.stringify([recipient]));
+          formData.append("subject", lockedSubject);
+          formData.append("message", lockedMessage);
+          lockedAttachments.forEach((file) => {
+            formData.append("attachments", file, file.name);
+          });
+
           const response = await fetch("/api/send", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ recipients: [recipient], subject, message }),
+            body: formData,
           });
           const result = await response.json();
 
@@ -569,7 +891,7 @@ const page = `<!doctype html>
             continue;
           }
 
-          setRecipientState(recipient, "sent", "✓");
+          setRecipientState(recipient, "sent", "\\u2713");
         }
 
         if (failed.length) {
@@ -580,9 +902,7 @@ const page = `<!doctype html>
       } catch (error) {
         setNotice(error.message, "error");
       } finally {
-        sendButton.disabled = false;
-        extractButton.disabled = false;
-        sendButton.textContent = "Send to recipients";
+        setSendingLock(false);
       }
     });
 
@@ -634,12 +954,19 @@ const handleSend = async (request, response) => {
       return;
     }
 
-    const body = await readJsonBody(request);
-    const recipients = Array.isArray(body.recipients)
-      ? [...new Set(body.recipients.map((email) => String(email).trim().toLowerCase()).filter(Boolean))]
-      : parseRecipients(body.recipients);
+    const contentType = request.headers["content-type"] || "";
+    const body = contentType.includes("multipart/form-data")
+      ? await readMultipartSendBody(request)
+      : await readJsonBody(request);
+    const parsedRecipients = typeof body.recipients === "string" && body.recipients.trim().startsWith("[")
+      ? JSON.parse(body.recipients)
+      : body.recipients;
+    const recipients = Array.isArray(parsedRecipients)
+      ? [...new Set(parsedRecipients.map((email) => String(email).trim().toLowerCase()).filter(Boolean))]
+      : parseRecipients(parsedRecipients);
     const subject = String(body.subject || "").trim();
     const message = String(body.message || "").trim();
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
     const invalid = recipients.filter((email) => !emailPattern.test(email));
 
     if (!recipients.length) {
@@ -664,9 +991,13 @@ const handleSend = async (request, response) => {
       subject,
       text: message,
       html,
+      attachments,
     });
 
-    sendJson(response, 200, { sent: recipients });
+    sendJson(response, 200, {
+      sent: recipients,
+      attachments: attachments.map((attachment) => attachment.filename),
+    });
   } catch (error) {
     sendJson(response, 500, { error: error.message || "Unable to send email." });
   }

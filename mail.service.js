@@ -17,7 +17,7 @@ const transporter = hasMailConfig ? nodemailer.createTransport({
 
 const hasMultipleRecipients = (to = "") => /[,;\n\r]/.test(String(to));
 
-export async function sendEmail({ to, subject, html, text }) {
+export async function sendEmail({ to, subject, html, text, attachments = [] }) {
     if (!transporter) {
         console.warn("Email not sent: mail service is not configured");
         return;
@@ -33,17 +33,19 @@ export async function sendEmail({ to, subject, html, text }) {
         subject,
         html,
         text,
+        attachments,
     };
     return transporter.sendMail(mailOptions);
 }
 
-export async function sendEmailsSeparately({ recipients, subject, html, text }) {
+export async function sendEmailsSeparately({ recipients, subject, html, text, attachments = [] }) {
     for (const recipient of recipients) {
         await sendEmail({
             to: recipient,
             subject,
             html,
             text,
+            attachments,
         });
     }
 }
