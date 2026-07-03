@@ -14,14 +14,34 @@ const normalizeText = (value = "") => {
 };
 
 const cleanEmail = (value = "") => {
-    return String(value)
-        .trim()
-        .replace(/^mailto:/i, "")
-        .replace(trailingJunkRegex, "")
-        .toLowerCase();
+    let v = String(value);
+
+    // 1) basic cleanup
+    v = v.trim().replace(/^mailto:/i, "");
+
+    // 2) remove obvious trailing punctuation/junk
+    v = v.replace(trailingJunkRegex, "");
+
+    // 3) Some PDFs may contain numbered list markers prefixed to the local-part,
+    //    e.g. "1ritikturkar13@gmail.com" => "ritikturkar13@gmail.com".
+    //    This targets digits immediately before the first email local-part char.
+    //    (We apply it only to things that look like emails.)
+    const emailLike = v.match(emailRegex);
+    if (emailLike && emailLike[0]) {
+        v = emailLike[0];
+    }
+
+    // Remove leading serial digits (1..100.. etc) only when they appear
+    // directly before an email address.
+    // Example: "1ritikturkar13@gmail.com" -> "ritikturkar13@gmail.com"
+    v = v.replace(/^(\d{1,4})(?=[a-zA-Z0-9][a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]*@)/, "");
+
+
+    return v.trim().toLowerCase();
 };
 
 const addEmailsFromText = (emails, value) => {
+
     const text = normalizeText(value);
     const found = text.match(emailRegex) || [];
 

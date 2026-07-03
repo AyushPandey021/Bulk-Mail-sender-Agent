@@ -25,14 +25,14 @@ const isMailConfigured = mailConfigKeys.every((key) => Boolean(process.env[key])
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const parseRecipients = (value = "") => {
-  return [
-    ...new Set(
-      value
-        .split(/[\s,;]+/)
-        .map((email) => email.trim().toLowerCase())
-        .filter(Boolean)
-    ),
-  ];
+  const raw = String(value || "")
+    .split(/[\s,;]+/)
+    .map((email) => String(email).trim().toLowerCase())
+    .filter(Boolean);
+
+  // Only keep valid email addresses so the frontend count/manifest matches
+  // what will actually be sent.
+  return [...new Set(raw.filter((email) => emailPattern.test(email)))];
 };
 
 const readJsonBody = (request) => {
@@ -836,7 +836,8 @@ const page = `<!doctype html>
       event.preventDefault();
 
       const recipients = parseRecipients(recipientsInput.value);
-      const invalid = recipients.filter((email) => !emailPattern.test(email));
+
+      // parseRecipients already filters invalid emails.
       const subject = subjectInput.value.trim();
       const message = messageInput.value.trim();
 
@@ -845,10 +846,13 @@ const page = `<!doctype html>
         return;
       }
 
+      // Validate on the client too (the backend will validate as well).
+      const invalid = recipients.filter((email) => !emailPattern.test(email));
       if (invalid.length) {
         setNotice("Fix invalid email addresses before sending.", "error");
         return;
       }
+
 
       if (!subject || !message) {
         setNotice("Subject and message are required.", "error");
