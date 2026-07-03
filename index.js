@@ -1,5 +1,6 @@
 import http from "http";
 import dotenv from "dotenv";
+import Busboy from "busboy";
 
 dotenv.config();
 
@@ -13,6 +14,7 @@ for (const key of [
 }
 
 const { sendEmailsSeparately } = await import("./mail.service.js");
+const { extractEmailsFromFiles } = await import("./extract.service.js");
 
 const PORT = Number(process.env.PORT || 3000);
 const mailConfigKeys = [
@@ -245,57 +247,64 @@ const page = `<!doctype html>
       opacity: 0.65;
     }
 
-    .metric-row {
+    .recipient-list {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 10px;
+      gap: 8px;
+      max-height: 320px;
+      min-height: 120px;
+      overflow-y: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfcfe;
       margin-bottom: 18px;
     }
 
-    .metric {
-      min-height: 78px;
+    .recipient-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      min-height: 38px;
+      padding: 8px 10px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 12px;
-      background: #fbfcfe;
+      background: #fff;
     }
 
-    .metric strong {
-      display: block;
-      font-size: 24px;
-      line-height: 1;
-      margin-bottom: 8px;
+    .recipient-email {
+      overflow-wrap: anywhere;
+      font-size: 14px;
+      line-height: 1.35;
     }
 
-    .metric span {
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .chips {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      min-height: 42px;
-      margin-top: 12px;
-    }
-
-    .chip {
+    .recipient-state {
       display: inline-flex;
       align-items: center;
-      max-width: 100%;
-      min-height: 30px;
-      padding: 0 10px;
+      justify-content: center;
+      min-width: 28px;
+      min-height: 28px;
       border-radius: 999px;
-      background: #e7f6f4;
-      color: #0b5f59;
-      font-size: 13px;
-      overflow-wrap: anywhere;
+      color: var(--muted);
+      background: #edf2f7;
+      font-weight: 800;
+      font-size: 15px;
     }
 
-    .chip.bad {
-      background: #fff1f0;
+    .recipient-row.sending .recipient-state {
+      color: #8a4b00;
+      background: #fff4d6;
+    }
+
+    .recipient-row.sent .recipient-state {
+      color: var(--success);
+      background: #ecfdf3;
+    }
+
+    .recipient-row.bad .recipient-state,
+    .recipient-row.failed .recipient-state {
       color: var(--danger);
+      background: #fff1f0;
     }
 
     .message-preview {
@@ -372,8 +381,8 @@ const page = `<!doctype html>
         padding: 16px;
       }
 
-      .metric-row {
-        grid-template-columns: 1fr;
+      .recipient-list {
+        max-height: 260px;
       }
 
       button {
@@ -398,6 +407,12 @@ const page = `<!doctype html>
         </div>
 
         <div class="field">
+          <label for="fileInput">Upload files (PDF, XLSX, CSV)</label>
+          <input id="fileInput" name="files" type="file" multiple accept=".pdf,.xls,.xlsx,.csv,text/csv" />
+          <div class="hint">Select one or more PDF/Excel/CSV files to extract emails.</div>
+        </div>
+
+        <div class="field">
           <label for="subject">Subject</label>
           <input id="subject" name="subject" type="text" placeholder="Quick update" />
         </div>
@@ -409,19 +424,14 @@ const page = `<!doctype html>
 
         <div class="actions">
           <button class="clear" type="button" id="clearButton">Clear</button>
+          <button class="clear" type="button" id="extractButton">Extract emails</button>
           <button class="send" type="submit" id="sendButton">Send to recipients</button>
         </div>
       </form>
 
       <aside class="panel preview">
-        <div class="metric-row">
-          <div class="metric"><strong id="totalCount">0</strong><span>Total</span></div>
-          <div class="metric"><strong id="validCount">0</strong><span>Valid</span></div>
-          <div class="metric"><strong id="invalidCount">0</strong><span>Invalid</span></div>
-        </div>
-
         <div class="notice" id="notice">Write a message, add recipients, then send once.</div>
-        <div class="chips" id="chips"></div>
+        <div class="recipient-list" id="recipientList"></div>
 
         <div class="message-preview">
           <div class="subject-preview" id="subjectPreview">Subject preview</div>
@@ -439,12 +449,11 @@ const page = `<!doctype html>
     const sendButton = document.querySelector("#sendButton");
     const clearButton = document.querySelector("#clearButton");
     const notice = document.querySelector("#notice");
-    const chips = document.querySelector("#chips");
-    const totalCount = document.querySelector("#totalCount");
-    const validCount = document.querySelector("#validCount");
-    const invalidCount = document.querySelector("#invalidCount");
+    const recipientList = document.querySelector("#recipientList");
     const subjectPreview = document.querySelector("#subjectPreview");
     const bodyPreview = document.querySelector("#bodyPreview");
+    const fileInput = document.querySelector("#fileInput");
+    const extractButton = document.querySelector("#extractButton");
     const emailPattern = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;
 
     const parseRecipients = (value) => {
@@ -456,31 +465,50 @@ const page = `<!doctype html>
       notice.className = "notice" + (type ? " " + type : "");
     };
 
+    const setRecipientState = (email, state, symbol) => {
+      const row = recipientList.querySelector('[data-email="' + CSS.escape(email) + '"]');
+      if (!row) return;
+
+      row.className = "recipient-row " + state;
+      row.querySelector(".recipient-state").textContent = symbol;
+    };
+
     const updatePreview = () => {
       const emails = parseRecipients(recipientsInput.value);
       const valid = emails.filter((email) => emailPattern.test(email));
       const invalid = emails.filter((email) => !emailPattern.test(email));
 
-      totalCount.textContent = emails.length;
-      validCount.textContent = valid.length;
-      invalidCount.textContent = invalid.length;
       subjectPreview.textContent = subjectInput.value.trim() || "Subject preview";
       bodyPreview.textContent = messageInput.value.trim() || "Message preview";
 
-      chips.innerHTML = "";
-      emails.slice(0, 30).forEach((email) => {
-        const chip = document.createElement("span");
-        chip.className = "chip" + (emailPattern.test(email) ? "" : " bad");
-        chip.textContent = email;
-        chips.appendChild(chip);
-      });
+      recipientList.innerHTML = "";
 
-      if (emails.length > 30) {
-        const chip = document.createElement("span");
-        chip.className = "chip";
-        chip.textContent = "+" + (emails.length - 30) + " more";
-        chips.appendChild(chip);
+      if (!emails.length) {
+        const empty = document.createElement("div");
+        empty.className = "recipient-row";
+        empty.innerHTML = '<span class="recipient-email">No email selected</span><span class="recipient-state">-</span>';
+        recipientList.appendChild(empty);
+        return;
       }
+
+      emails.forEach((email) => {
+        const isValid = emailPattern.test(email);
+        const row = document.createElement("div");
+        row.className = "recipient-row" + (isValid ? "" : " bad");
+        row.dataset.email = email;
+
+        const emailText = document.createElement("span");
+        emailText.className = "recipient-email";
+        emailText.textContent = email;
+
+        const state = document.createElement("span");
+        state.className = "recipient-state";
+        state.textContent = isValid ? "-" : "!";
+
+        row.appendChild(emailText);
+        row.appendChild(state);
+        recipientList.appendChild(row);
+      });
     };
 
     [recipientsInput, subjectInput, messageInput].forEach((input) => {
@@ -517,27 +545,78 @@ const page = `<!doctype html>
       }
 
       sendButton.disabled = true;
+      extractButton.disabled = true;
       sendButton.textContent = "Sending...";
-      setNotice("Sending message to " + recipients.length + " recipient" + (recipients.length === 1 ? "" : "s") + ".");
+      setNotice("Sending one by one...");
 
       try {
-        const response = await fetch("/api/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ recipients, subject, message }),
-        });
-        const result = await response.json();
+        const failed = [];
 
-        if (!response.ok) {
-          throw new Error(result.error || "Unable to send email.");
+        for (const recipient of recipients) {
+          setRecipientState(recipient, "sending", "...");
+          setNotice("Sending to " + recipient);
+
+          const response = await fetch("/api/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ recipients: [recipient], subject, message }),
+          });
+          const result = await response.json();
+
+          if (!response.ok) {
+            setRecipientState(recipient, "failed", "!");
+            failed.push(recipient);
+            continue;
+          }
+
+          setRecipientState(recipient, "sent", "✓");
         }
 
-        setNotice("Sent successfully to " + result.sent + " recipient" + (result.sent === 1 ? "" : "s") + ".", "success");
+        if (failed.length) {
+          setNotice("Some emails failed. Check the marked email rows.", "error");
+        } else {
+          setNotice("All emails sent successfully.", "success");
+        }
       } catch (error) {
         setNotice(error.message, "error");
       } finally {
         sendButton.disabled = false;
+        extractButton.disabled = false;
         sendButton.textContent = "Send to recipients";
+      }
+    });
+
+    extractButton.addEventListener("click", async () => {
+      const files = fileInput.files;
+      if (!files || files.length === 0) {
+        setNotice("Select at least one file to extract from.", "error");
+        return;
+      }
+
+      extractButton.disabled = true;
+      extractButton.textContent = "Extracting...";
+      setNotice("Extracting emails from files...");
+
+      try {
+        const formData = new FormData();
+        for (const f of files) formData.append("files", f);
+
+        const res = await fetch("/api/extract", { method: "POST", body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Extraction failed");
+
+        if (Array.isArray(data.emails) && data.emails.length) {
+          recipientsInput.value = data.emails.join(", ");
+          updatePreview();
+          setNotice("Extracted emails are ready to send.", "success");
+        } else {
+          setNotice("No emails found in uploaded files.", "error");
+        }
+      } catch (err) {
+        setNotice(err.message || "Extraction error", "error");
+      } finally {
+        extractButton.disabled = false;
+        extractButton.textContent = "Extract emails";
       }
     });
 
@@ -587,10 +666,83 @@ const handleSend = async (request, response) => {
       html,
     });
 
-    sendJson(response, 200, { sent: recipients.length });
+    sendJson(response, 200, { sent: recipients });
   } catch (error) {
     sendJson(response, 500, { error: error.message || "Unable to send email." });
   }
+};
+
+const handleExtract = (request, response) => {
+  return new Promise((resolve) => {
+    try {
+      const contentType = request.headers["content-type"] || "";
+
+      if (!contentType.includes("multipart/form-data")) {
+        sendJson(response, 400, { error: "Upload files as multipart/form-data." });
+        resolve();
+        return;
+      }
+
+      const fileEntries = [];
+      const busboy = Busboy({
+        headers: request.headers,
+        limits: {
+          files: 20,
+          fileSize: 25 * 1024 * 1024,
+        },
+      });
+
+      busboy.on("file", (fieldname, file, info) => {
+        if (fieldname !== "files") {
+          file.resume();
+          return;
+        }
+
+        const chunks = [];
+        const filename = info?.filename || "file";
+
+        file.on("data", (chunk) => {
+          chunks.push(chunk);
+        });
+
+        file.on("limit", () => {
+          console.warn(`Upload skipped because it is too large: ${filename}`);
+          chunks.length = 0;
+          file.resume();
+        });
+
+        file.on("end", () => {
+          if (chunks.length) {
+            fileEntries.push({
+              filename,
+              buffer: Buffer.concat(chunks),
+            });
+          }
+        });
+      });
+
+      busboy.on("error", (err) => {
+        sendJson(response, 500, { error: err.message || "Failed to parse uploaded files." });
+        resolve();
+      });
+
+      busboy.on("finish", async () => {
+        try {
+          const emails = await extractEmailsFromFiles(fileEntries);
+          sendJson(response, 200, { emails, count: emails.length });
+        } catch (procErr) {
+          sendJson(response, 500, { error: procErr.message || "Extraction failed." });
+        }
+
+        resolve();
+      });
+
+      request.pipe(busboy);
+    } catch (err) {
+      sendJson(response, 500, { error: err.message || "Extraction failed." });
+      resolve();
+    }
+  });
 };
 
 const server = http.createServer(async (request, response) => {
@@ -605,7 +757,22 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && request.url === "/api/extract") {
+    await handleExtract(request, response);
+    return;
+  }
+
   sendJson(response, 404, { error: "Not found." });
+});
+
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`Port ${PORT} is already in use. Close the other server or set PORT to a different number in .env.`);
+    process.exit(1);
+  }
+
+  console.error(error);
+  process.exit(1);
 });
 
 server.listen(PORT, () => {
